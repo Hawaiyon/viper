@@ -206,6 +206,8 @@ type Viper struct {
 	envKeyReplacer      StringReplacer
 	allowEmptyEnv       bool
 
+	// mutex protect following map from concurrent write from config watching
+	mutex          sync.RWMutex
 	config         map[string]interface{}
 	override       map[string]interface{}
 	defaults       map[string]interface{}
@@ -882,6 +884,9 @@ func GetViper() *Viper {
 func Get(key string) interface{} { return v.Get(key) }
 
 func (v *Viper) Get(key string) interface{} {
+	v.mutex.RLock()
+	defer v.mutex.RUnlock()
+
 	lcaseKey := strings.ToLower(key)
 	val := v.find(lcaseKey, true)
 	if val == nil {
@@ -1223,7 +1228,6 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) interface{} {
 	lcaseKey = v.realKey(lcaseKey)
 	path = strings.Split(lcaseKey, v.keyDelim)
 	nested = len(path) > 1
-
 	// Set() override first
 	val = v.searchMap(v.override, path)
 	if val != nil {
@@ -1380,6 +1384,8 @@ func stringToStringConv(val string) interface{} {
 func IsSet(key string) bool { return v.IsSet(key) }
 
 func (v *Viper) IsSet(key string) bool {
+	v.mutex.RLock()
+	defer v.mutex.RUnlock()
 	lcaseKey := strings.ToLower(key)
 	val := v.find(lcaseKey, false)
 	return val != nil
@@ -1407,6 +1413,8 @@ func (v *Viper) SetEnvKeyReplacer(r *strings.Replacer) {
 func RegisterAlias(alias string, key string) { v.RegisterAlias(alias, key) }
 
 func (v *Viper) RegisterAlias(alias string, key string) {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
 	v.registerAlias(alias, strings.ToLower(key))
 }
 
@@ -1530,6 +1538,8 @@ func (v *Viper) ReadInConfig() error {
 		return err
 	}
 
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
 	v.config = config
 	return nil
 }
@@ -1561,6 +1571,9 @@ func (v *Viper) MergeInConfig() error {
 func ReadConfig(in io.Reader) error { return v.ReadConfig(in) }
 
 func (v *Viper) ReadConfig(in io.Reader) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
 	v.config = make(map[string]interface{})
 	return v.unmarshalReader(in, v.config)
 }
@@ -1581,6 +1594,9 @@ func (v *Viper) MergeConfig(in io.Reader) error {
 func MergeConfigMap(cfg map[string]interface{}) error { return v.MergeConfigMap(cfg) }
 
 func (v *Viper) MergeConfigMap(cfg map[string]interface{}) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
 	if v.config == nil {
 		v.config = make(map[string]interface{})
 	}
@@ -1647,7 +1663,9 @@ func (v *Viper) writeConfig(filename string, force bool) error {
 		return UnsupportedConfigError(configType)
 	}
 	if v.config == nil {
+		v.mutex.Lock()
 		v.config = make(map[string]interface{})
+		v.mutex.Unlock()
 	}
 	flags := os.O_CREATE | os.O_TRUNC | os.O_WRONLY
 	if !force {
@@ -1675,7 +1693,6 @@ func unmarshalReader(in io.Reader, c map[string]interface{}) error {
 func (v *Viper) unmarshalReader(in io.Reader, c map[string]interface{}) error {
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(in)
-
 	switch format := strings.ToLower(v.getConfigType()); format {
 	case "yaml", "yml", "json", "toml", "hcl", "tfvars", "ini", "properties", "props", "prop", "dotenv", "env":
 		err := v.decoderRegistry.Decode(format, buf.Bytes(), c)
@@ -1834,6 +1851,8 @@ func (v *Viper) ReadRemoteConfig() error {
 
 func WatchRemoteConfig() error { return v.WatchRemoteConfig() }
 func (v *Viper) WatchRemoteConfig() error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
 	return v.watchKeyValueConfig()
 }
 
@@ -1880,7 +1899,9 @@ func (v *Viper) watchKeyValueConfigOnChannel() error {
 			for {
 				b := <-rc
 				reader := bytes.NewReader(b.Value)
+				v.mutex.Lock()
 				v.unmarshalReader(reader, v.kvstore)
+				v.mutex.Unlock()
 			}
 		}(respc)
 		return nil
@@ -1915,6 +1936,9 @@ func (v *Viper) watchRemoteConfig(provider RemoteProvider) (map[string]interface
 func AllKeys() []string { return v.AllKeys() }
 
 func (v *Viper) AllKeys() []string {
+	v.mutex.RLock()
+	defer v.mutex.RUnlock()
+
 	m := map[string]bool{}
 	// add all paths, by order of descending priority to ensure correct shadowing
 	m = v.flattenAndMergeMap(m, castMapStringToMapInterface(v.aliases), "")
